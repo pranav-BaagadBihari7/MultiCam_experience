@@ -1,0 +1,31 @@
+/deep-research i want to research the app from multiple perspectives
+App name : Final cut
+ios app
+subagents to use
+1. Principal product manager : to understand product features and specs
+2. Senior UX researcher : to understand design language, interactions etc
+3. back end engineer : to understand data base considerations
+4. ios engineer : to understand how this maobile native app will work and also suggest on how we can build the same with android
+5. a flimaker : to understand latent needs of creators in this space
+
+then review it with a senior architect and senior Product director on few parameters till he rates it as 8.5 or above
+1. how close the specs are with respect to final cut app
+2. how easy it is to scale
+3. what AI features can be added
+4. latency considerations
+5. on device AI model use case for specific AI feature
+6. Wow factor for creator audience
+7. differentiation from peepective of ios to andriod ( what featuers/capabilities that andriod can add which is difficult in ios )
+8. tech stack considerations
+
+Loop through this task till both senior architect and product director give a rating of 8.5 or above
+also help me plan on what softwares i will need to download and use to actually build this
+interview me tll you have understood the requirement
+
+output
+3 docs
+1. Product spec
+2. design spec
+3. technical spec
+
+use all relevant skills or github repos as needed
