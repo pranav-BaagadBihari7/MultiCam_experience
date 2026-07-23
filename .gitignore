@@ -13,3 +13,10 @@ DecoderSpike/local.properties
 
 # Local Claude Code session settings
 .claude/
+
+# MultiCam app build outputs
+MultiCam/build/
+MultiCam/app/build/
+MultiCam/.gradle/
+MultiCam/build.log
+MultiCam/local.properties
