@@ -6,11 +6,13 @@ import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -89,12 +93,61 @@ private fun EventLog(lines: List<String>) {
 // Controller
 // ---------------------------------------------------------------------------
 
+/** One live camera tile: the monitor feed + name + status badge. */
+@Composable
+private fun CameraTile(
+    name: String,
+    report: ControllerViewModel.TakeReport?,
+    frame: ImageBitmap?,
+    modifier: Modifier = Modifier,
+) {
+    Card(modifier) {
+        Box(Modifier.fillMaxSize()) {
+            if (frame != null) {
+                Image(
+                    bitmap = frame,
+                    contentDescription = name,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("no feed", fontSize = 12.sp, color = Color.Gray)
+                }
+            }
+            // Name, bottom-left.
+            Text(
+                name,
+                Modifier.align(Alignment.BottomStart).padding(6.dp),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = Color.White,
+            )
+            // Status badge, top-right.
+            Text(
+                report?.state ?: "READY",
+                Modifier.align(Alignment.TopEnd).padding(6.dp),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = when (report?.state) {
+                    "RECORDING" -> Color(0xFFFF5252)
+                    "SAVED" -> Color(0xFF69F0AE)
+                    "ALIGNED" -> Color(0xFF40C4FF)
+                    "ERROR", "NO_AUDIO" -> Color(0xFFFFAB40)
+                    else -> Color.LightGray
+                },
+            )
+        }
+    }
+}
+
 @Composable
 fun ControllerScreen(vm: ControllerViewModel = viewModel()) {
     LaunchedEffect(Unit) { vm.start() }
     val cameras by vm.cameras.collectAsState()
     val reports by vm.reports.collectAsState()
     val rolling by vm.rolling.collectAsState()
+    val frames by vm.frames.collectAsState()
     val log by vm.log.collectAsState()
 
     Column(
@@ -103,39 +156,28 @@ fun ControllerScreen(vm: ControllerViewModel = viewModel()) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("CONTROLLER - session ${vm.sessionId}", fontSize = 14.sp)
-        BigClock("SESSION CLOCK (reference)") { vm.sessionNanos() }
+        BigClock("SESSION CLOCK (reference)", size = 40) { vm.sessionNanos() }
 
         Text(
             if (cameras.isEmpty()) "Waiting for cameras..." else "${cameras.size} camera(s) connected",
             fontSize = 15.sp,
         )
-        cameras.forEach { cam ->
-            val report = reports[cam.deviceId]
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(cam.name, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
-                        Text(
-                            report?.state ?: "READY",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 14.sp,
-                            color = when (report?.state) {
-                                "RECORDING" -> Color(0xFFFF5252)
-                                "SAVED" -> Color(0xFF69F0AE)
-                                "ALIGNED" -> Color(0xFF40C4FF)
-                                "ERROR", "NO_AUDIO" -> Color(0xFFFFAB40)
-                                else -> Color.Gray
-                            },
-                        )
+
+        // Live multi-view grid — 2-up rows of camera tiles, each showing the
+        // low-bitrate monitor feed + name + status. Takes the free vertical space.
+        Column(
+            Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            cameras.chunked(2).forEach { rowCams ->
+                Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowCams.forEach { cam ->
+                        CameraTile(cam.name, reports[cam.deviceId], frames[cam.deviceId], Modifier.weight(1f).fillMaxHeight())
                     }
-                    report?.let {
-                        Text(it.detail, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.Gray)
-                    }
+                    if (rowCams.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }
-
-        Spacer(Modifier.weight(1f))
 
         Button(
             onClick = { if (rolling) vm.stopTake() else vm.roll() },

@@ -4,9 +4,13 @@ import android.app.Application
 import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
+import android.content.Context
+import android.os.PowerManager
 import android.util.Base64
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.multicam.capture.CaptureEngine
@@ -17,8 +21,11 @@ import com.multicam.sync.TimeSyncClient
 import com.multicam.sync.TimeSyncServer
 import com.multicam.transport.ControlClient
 import com.multicam.transport.ControlServer
+import com.multicam.transport.MonitorSender
+import com.multicam.transport.MonitorServer
 import com.multicam.transport.Msg
 import com.multicam.transport.NsdHelper
+import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,6 +76,17 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
     private val timeSyncServer = TimeSyncServer(viewModelScope)
     private var timeSyncPort = 0
 
+    // S4 live monitor: accepts a JPEG stream per camera, publishes the latest
+    // frame per device for the grid. Decode happens off-main inside MonitorServer.
+    private val _frames = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+    val frames: StateFlow<Map<String, ImageBitmap>> = _frames
+    private val monitorServer = MonitorServer(
+        viewModelScope,
+        onFrame = { id, bmp -> _frames.value = _frames.value + (id to bmp.asImageBitmap()) },
+        onStreamEnd = { id -> _frames.value = _frames.value - id },
+    )
+    private var monitorPort = 0
+
     private val connToCamera = mutableMapOf<ControlServer.ClientConn, ConnectedCamera>()
 
     private val server = ControlServer(
@@ -79,7 +97,7 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
                     val cam = ConnectedCamera(msg.deviceId, msg.name, conn.remoteAddress)
                     synchronized(connToCamera) { connToCamera[conn] = cam }
                     _cameras.value = synchronized(connToCamera) { connToCamera.values.toList() }
-                    conn.send(Msg.Welcome(sessionId, timeSyncPort))
+                    conn.send(Msg.Welcome(sessionId, timeSyncPort, monitorPort))
                     logLine("+ ${cam.name} (${cam.address})")
                 }
                 is Msg.TakeStatus -> {
@@ -93,7 +111,10 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
         onDisconnect = { conn ->
             val cam = synchronized(connToCamera) { connToCamera.remove(conn) }
             _cameras.value = synchronized(connToCamera) { connToCamera.values.toList() }
-            cam?.let { logLine("- ${it.name} disconnected") }
+            cam?.let {
+                _frames.value = _frames.value - it.deviceId
+                logLine("- ${it.name} disconnected")
+            }
         },
     )
 
@@ -102,9 +123,10 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun start() {
         timeSyncPort = timeSyncServer.start()
+        monitorPort = monitorServer.start()
         val controlPort = server.start()
         nsd.advertise(controlPort, Build.MODEL, ::logLine)
-        logLine("session $sessionId - control :$controlPort - timesync :$timeSyncPort/udp")
+        logLine("session $sessionId - control :$controlPort - timesync :$timeSyncPort/udp - monitor :$monitorPort")
     }
 
     fun roll() {
@@ -197,6 +219,7 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
         nsd.stop()
         server.stop()
         timeSyncServer.stop()
+        monitorServer.stop()
         super.onCleared()
     }
 }
@@ -221,6 +244,21 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private val timeSyncClient = TimeSyncClient(viewModelScope)
     val estimate: StateFlow<ClockEstimate?> = timeSyncClient.estimate
 
+    // S4 monitor: JPEG compression runs on its own thread, off main and off the
+    // encoder threads, so it cannot contend with the master recording pipeline.
+    private val monitorExecutor = Executors.newSingleThreadExecutor()
+    private val monitorSender = MonitorSender(viewModelScope, deviceId)
+    private val power = app.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
+        // Shed the monitor first; the master recording is never in this ladder.
+        when {
+            status >= PowerManager.THERMAL_STATUS_SEVERE ->
+                monitorSender.apply { intervalMs = 500; maxWidth = 384; quality = 40 } // ~2 fps
+            status >= PowerManager.THERMAL_STATUS_MODERATE ->
+                monitorSender.apply { intervalMs = 200; maxWidth = 384; quality = 45 } // ~5 fps
+        }
+    }
+
     private val nsd = NsdHelper(app)
     private var connectedHost: java.net.InetAddress? = null
     private var connectedPort = 0
@@ -242,7 +280,19 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 is Msg.Welcome -> {
                     logLine("session ${msg.sessionId} - locking clock...")
                     _phase.value = Phase.SYNCING
-                    connectedHost?.let { timeSyncClient.start(it, msg.timeSyncPort) }
+                    connectedHost?.let { host ->
+                        timeSyncClient.start(host, msg.timeSyncPort)
+                        // Start the live monitor feed once we know the port — but
+                        // only if the device accepted the 3-use-case bind. If not,
+                        // the master still records; there's just no feed.
+                        if (engine.monitorSupported) {
+                            engine.setMonitorAnalyzer(monitorExecutor, monitorSender.analyzer)
+                            monitorSender.start(host, msg.monitorPort)
+                            logLine("monitor streaming")
+                        } else {
+                            logLine("monitor unsupported here (recording unaffected)")
+                        }
+                    }
                 }
                 is Msg.Roll -> handleRoll(msg)
                 is Msg.Stop -> currentRecording?.stop()
@@ -279,6 +329,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun start() {
+        runCatching { power.addThermalStatusListener(thermalListener) }
         nsd.discover(
             onFound = { host, port -> doConnect(host, port) },
             onEvent = ::logLine,
@@ -330,6 +381,9 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     val actualSession = actualStartLocal + offset
                     val deltaMs = (actualSession - scheduledStartSession) / 1_000_000
                     _rec.value = RecState.RECORDING
+                    // Ease the monitor off while the master encoder is the heat source:
+                    // presence over smoothness during a take.
+                    monitorSender.apply { intervalMs = 143; maxWidth = 384; quality = 45 } // ~7 fps
                     logLine("REC - started %+d ms vs T".format(deltaMs))
                     client.send(
                         Msg.TakeStatus(deviceId, takeId ?: "?", "RECORDING", "$safeModel %+d ms vs T".format(deltaMs))
@@ -337,6 +391,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 is VideoRecordEvent.Finalize -> {
                     _rec.value = RecState.IDLE
+                    monitorSender.apply { intervalMs = 100; maxWidth = 480; quality = 55 } // back to ~10 fps
                     if (event.hasError()) {
                         logLine("record error ${event.error}")
                         client.send(Msg.TakeStatus(deviceId, takeId ?: "?", "ERROR", "code ${event.error} on $safeModel"))
@@ -409,6 +464,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         nsd.stop()
         client.close()
         timeSyncClient.stop()
+        monitorSender.stop()
+        engine.clearMonitorAnalyzer()
+        monitorExecutor.shutdown()
+        runCatching { power.removeThermalStatusListener(thermalListener) }
         super.onCleared()
     }
 }

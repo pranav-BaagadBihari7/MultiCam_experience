@@ -18,8 +18,8 @@ sealed class Msg {
     /** camera -> controller, first message after connect */
     data class Hello(val deviceId: String, val name: String) : Msg()
 
-    /** controller -> camera, reply to Hello. Carries the UDP time-sync port. */
-    data class Welcome(val sessionId: String, val timeSyncPort: Int) : Msg()
+    /** controller -> camera, reply to Hello. Carries the UDP time-sync port and the TCP monitor port. */
+    data class Welcome(val sessionId: String, val timeSyncPort: Int, val monitorPort: Int) : Msg()
 
     /** controller -> all cameras: start recording at this session-clock instant. */
     data class Roll(val takeId: String, val startAtSessionNanos: Long) : Msg()
@@ -52,7 +52,7 @@ sealed class Msg {
         is Hello -> JSONObject().put("type", "HELLO")
             .put("deviceId", deviceId).put("name", name)
         is Welcome -> JSONObject().put("type", "WELCOME")
-            .put("sessionId", sessionId).put("timeSyncPort", timeSyncPort)
+            .put("sessionId", sessionId).put("timeSyncPort", timeSyncPort).put("monitorPort", monitorPort)
         is Roll -> JSONObject().put("type", "ROLL")
             .put("takeId", takeId).put("startAtSessionNanos", startAtSessionNanos)
         is Stop -> JSONObject().put("type", "STOP").put("takeId", takeId)
@@ -70,7 +70,7 @@ sealed class Msg {
             val o = JSONObject(line)
             when (o.getString("type")) {
                 "HELLO" -> Hello(o.getString("deviceId"), o.getString("name"))
-                "WELCOME" -> Welcome(o.getString("sessionId"), o.getInt("timeSyncPort"))
+                "WELCOME" -> Welcome(o.getString("sessionId"), o.getInt("timeSyncPort"), o.getInt("monitorPort"))
                 "ROLL" -> Roll(o.getString("takeId"), o.getLong("startAtSessionNanos"))
                 "STOP" -> Stop(o.getString("takeId"))
                 "TAKE_STATUS" -> TakeStatus(
