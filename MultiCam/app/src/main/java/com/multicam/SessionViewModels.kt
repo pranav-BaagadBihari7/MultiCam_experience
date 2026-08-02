@@ -223,6 +223,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     private val nsd = NsdHelper(app)
     private var connectedHost: java.net.InetAddress? = null
+    private var connectedPort = 0
+    private var stopped = false
 
     private var currentRecording: Recording? = null
 
@@ -248,21 +250,37 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             }
         },
         onDisconnect = {
-            logLine("controller lost - searching again")
+            timeSyncClient.stop()
             _phase.value = Phase.SEARCHING
+            // Reconnect directly to the known controller rather than waiting for
+            // NSD to re-announce it (mDNS only fires onServiceFound for NEW
+            // services, so a dropped camera could otherwise hang in SEARCHING).
+            val host = connectedHost
+            if (!stopped && host != null) {
+                logLine("controller lost - reconnecting...")
+                viewModelScope.launch {
+                    delay(600)
+                    if (!stopped && _phase.value == Phase.SEARCHING) doConnect(host, connectedPort)
+                }
+            } else {
+                logLine("controller lost - searching again")
+            }
         },
     )
 
+    private fun doConnect(host: java.net.InetAddress, port: Int) {
+        if (_phase.value != Phase.SEARCHING) return
+        _phase.value = Phase.CONNECTING
+        connectedHost = host
+        connectedPort = port
+        client.connect(host, port) {
+            client.send(Msg.Hello(deviceId, Build.MODEL))
+        }
+    }
+
     fun start() {
         nsd.discover(
-            onFound = { host, port ->
-                if (_phase.value != Phase.SEARCHING) return@discover
-                _phase.value = Phase.CONNECTING
-                connectedHost = host
-                client.connect(host, port) {
-                    client.send(Msg.Hello(deviceId, Build.MODEL))
-                }
-            },
+            onFound = { host, port -> doConnect(host, port) },
             onEvent = ::logLine,
         )
         viewModelScope.launch {
@@ -386,6 +404,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        stopped = true
         currentRecording?.stop()
         nsd.stop()
         client.close()

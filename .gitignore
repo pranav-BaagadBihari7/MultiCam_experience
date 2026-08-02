@@ -20,3 +20,7 @@ MultiCam/app/build/
 MultiCam/.gradle/
 MultiCam/build.log
 MultiCam/local.properties
+
+# Recorded takes / test captures (large, machine-local, never in repo)
+takes/
+*.mp4
