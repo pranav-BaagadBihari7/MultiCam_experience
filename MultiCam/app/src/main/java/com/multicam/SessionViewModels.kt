@@ -248,6 +248,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     // encoder threads, so it cannot contend with the master recording pipeline.
     private val monitorExecutor = Executors.newSingleThreadExecutor()
     private val monitorSender = MonitorSender(viewModelScope, deviceId)
+    private var monitorHost: java.net.InetAddress? = null
+    private var monitorPort = 0
+    private var monitorAnalyzerSet = false
+    private var monitorMsgLogged = false
     private val power = app.getSystemService(Context.POWER_SERVICE) as PowerManager
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         // Shed the monitor first; the master recording is never in this ladder.
@@ -282,16 +286,12 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     _phase.value = Phase.SYNCING
                     connectedHost?.let { host ->
                         timeSyncClient.start(host, msg.timeSyncPort)
-                        // Start the live monitor feed once we know the port — but
-                        // only if the device accepted the 3-use-case bind. If not,
-                        // the master still records; there's just no feed.
-                        if (engine.monitorSupported) {
-                            engine.setMonitorAnalyzer(monitorExecutor, monitorSender.analyzer)
-                            monitorSender.start(host, msg.monitorPort)
-                            logLine("monitor streaming")
-                        } else {
-                            logLine("monitor unsupported here (recording unaffected)")
-                        }
+                        // Record the monitor target; the actual start is gated on the
+                        // camera also being bound (maybeStartMonitor) to avoid the
+                        // WELCOME-before-bind race that left the feed dead.
+                        monitorHost = host
+                        monitorPort = msg.monitorPort
+                        maybeStartMonitor()
                     }
                 }
                 is Msg.Roll -> handleRoll(msg)
@@ -326,6 +326,28 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         client.connect(host, port) {
             client.send(Msg.Hello(deviceId, Build.MODEL))
         }
+    }
+
+    /**
+     * Called by CameraScreen when CameraX finishes binding. Together with the
+     * WELCOME handler this resolves the bind-vs-WELCOME race: whichever completes
+     * last actually starts the monitor.
+     */
+    fun onCameraReady() = maybeStartMonitor()
+
+    private fun maybeStartMonitor() {
+        val h = monitorHost ?: return          // controller target not known yet
+        if (!engine.isReady) return            // camera not bound yet; onCameraReady() will retry
+        if (!engine.monitorSupported) {
+            if (!monitorMsgLogged) { monitorMsgLogged = true; logLine("monitor unsupported here (recording unaffected)") }
+            return
+        }
+        if (!monitorAnalyzerSet) {
+            monitorAnalyzerSet = true
+            engine.setMonitorAnalyzer(monitorExecutor, monitorSender.analyzer)
+            logLine("monitor streaming")
+        }
+        monitorSender.start(h, monitorPort)    // idempotent launch; refreshes target on reconnect
     }
 
     fun start() {

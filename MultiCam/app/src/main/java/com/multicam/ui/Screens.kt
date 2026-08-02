@@ -261,7 +261,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                             vm.engine.preview.surfaceProvider = pv.surfaceProvider
                             vm.engine.bind(
                                 ctx, lifecycleOwner,
-                                onReady = {},
+                                onReady = { vm.onCameraReady() },
                                 onError = {},
                             )
                         }

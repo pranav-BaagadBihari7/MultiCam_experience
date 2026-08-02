@@ -10,6 +10,7 @@ import androidx.camera.core.ImageProxy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -55,6 +56,16 @@ class MonitorSender(
     private var lastAtNanos = 0L
     private var socket: Socket? = null
 
+    // Idempotency + self-healing: the maintenance loop launches exactly ONCE. Repeated
+    // start() calls (e.g. a control-channel reconnect re-firing WELCOME) only update the
+    // target — they never spawn a second competing sender, which was the "Connection reset"
+    // flapping bug. host/port are @Volatile: written by start() on the control thread, read
+    // by the maintenance loop on IO.
+    @Volatile private var host: InetAddress? = null
+    @Volatile private var port: Int = 0
+    private var launched = false
+    @Volatile private var closed = false
+
     /** Attach via CaptureEngine.setMonitorAnalyzer(executor, analyzer). Runs on that executor. */
     val analyzer = ImageAnalysis.Analyzer { image ->
         try {
@@ -80,27 +91,44 @@ class MonitorSender(
             .toByteArray()
     }.getOrNull()
 
+    /**
+     * Set the target and start the self-healing maintenance loop. Safe to call repeatedly:
+     * the loop is launched only once; later calls just refresh host/port so a reconnect
+     * targets the current controller.
+     */
+    @Synchronized
     fun start(host: InetAddress, port: Int) {
+        this.host = host
+        this.port = port
+        if (launched) return
+        launched = true
         scope.launch(Dispatchers.IO) {
-            try {
-                val s = Socket(host, port).apply { tcpNoDelay = true }
-                socket = s
-                val out = DataOutputStream(BufferedOutputStream(s.getOutputStream()))
-                val id = deviceId.toByteArray(Charsets.UTF_8)
-                out.writeInt(id.size); out.write(id); out.flush() // handshake
-                Log.i(NET_TAG, "monitor: streaming as $deviceId")
-                for (jpeg in frames) { // sender loop drains the conflated channel
-                    out.writeInt(jpeg.size); out.write(jpeg); out.flush()
+            while (!closed) {
+                val h = this@MonitorSender.host
+                if (h == null) { delay(300); continue }
+                try {
+                    val s = Socket(h, this@MonitorSender.port).apply { tcpNoDelay = true; keepAlive = true }
+                    socket = s
+                    val out = DataOutputStream(BufferedOutputStream(s.getOutputStream()))
+                    val id = deviceId.toByteArray(Charsets.UTF_8)
+                    out.writeInt(id.size); out.write(id); out.flush() // handshake
+                    Log.i(NET_TAG, "monitor: streaming as $deviceId")
+                    for (jpeg in frames) { // drains the conflated channel until write throws
+                        out.writeInt(jpeg.size); out.write(jpeg); out.flush()
+                    }
+                    break // channel closed => stop() was called
+                } catch (e: Exception) {
+                    Log.w(NET_TAG, "monitor: sender drop, reconnecting: ${e.message}")
+                    runCatching { socket?.close() }
+                    if (closed) break
+                    delay(500) // reconnect backoff; the analyzer keeps refilling the conflated slot
                 }
-            } catch (e: Exception) {
-                Log.w(NET_TAG, "monitor: sender ended: ${e.message}")
-            } finally {
-                runCatching { socket?.close() }
             }
         }
     }
 
     fun stop() {
+        closed = true
         runCatching { socket?.close() }
         frames.close()
     }
