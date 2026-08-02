@@ -122,7 +122,8 @@ fun ControllerScreen(vm: ControllerViewModel = viewModel()) {
                             color = when (report?.state) {
                                 "RECORDING" -> Color(0xFFFF5252)
                                 "SAVED" -> Color(0xFF69F0AE)
-                                "ERROR" -> Color(0xFFFFAB40)
+                                "ALIGNED" -> Color(0xFF40C4FF)
+                                "ERROR", "NO_AUDIO" -> Color(0xFFFFAB40)
                                 else -> Color.Gray
                             },
                         )

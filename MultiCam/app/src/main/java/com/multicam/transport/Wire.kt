@@ -35,6 +35,19 @@ sealed class Msg {
         val detail: String,
     ) : Msg()
 
+    /**
+     * camera -> controller: mono 16 kHz PCM fingerprint of the take's first
+     * seconds (base64 LE shorts), stamped with the session-time of its first
+     * sample. S3's cross-correlation input — footage itself never ships.
+     */
+    data class AudioSnippet(
+        val deviceId: String,
+        val takeId: String,
+        val sampleRate: Int,
+        val startSessionNanos: Long,
+        val pcmBase64: String,
+    ) : Msg()
+
     fun toJson(): String = when (this) {
         is Hello -> JSONObject().put("type", "HELLO")
             .put("deviceId", deviceId).put("name", name)
@@ -46,6 +59,10 @@ sealed class Msg {
         is TakeStatus -> JSONObject().put("type", "TAKE_STATUS")
             .put("deviceId", deviceId).put("takeId", takeId)
             .put("state", state).put("detail", detail)
+        is AudioSnippet -> JSONObject().put("type", "AUDIO_SNIPPET")
+            .put("deviceId", deviceId).put("takeId", takeId)
+            .put("sampleRate", sampleRate).put("startSessionNanos", startSessionNanos)
+            .put("pcmBase64", pcmBase64)
     }.toString()
 
     companion object {
@@ -59,6 +76,11 @@ sealed class Msg {
                 "TAKE_STATUS" -> TakeStatus(
                     o.getString("deviceId"), o.getString("takeId"),
                     o.getString("state"), o.getString("detail"),
+                )
+                "AUDIO_SNIPPET" -> AudioSnippet(
+                    o.getString("deviceId"), o.getString("takeId"),
+                    o.getInt("sampleRate"), o.getLong("startSessionNanos"),
+                    o.getString("pcmBase64"),
                 )
                 else -> null
             }

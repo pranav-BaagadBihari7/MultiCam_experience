@@ -4,12 +4,15 @@ import android.app.Application
 import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
+import android.util.Base64
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.multicam.capture.CaptureEngine
+import com.multicam.sync.AudioExtract
 import com.multicam.sync.ClockEstimate
+import com.multicam.sync.Xcorr
 import com.multicam.sync.TimeSyncClient
 import com.multicam.sync.TimeSyncServer
 import com.multicam.transport.ControlClient
@@ -83,6 +86,7 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
                     _reports.value = _reports.value + (msg.deviceId to TakeReport(msg.state, msg.detail))
                     logLine("${msg.state}: ${msg.detail}")
                 }
+                is Msg.AudioSnippet -> onSnippet(msg)
                 else -> Unit
             }
         },
@@ -125,6 +129,63 @@ class ControllerViewModel(app: Application) : AndroidViewModel(app) {
         val conns = synchronized(connToCamera) { connToCamera.keys.toList() }
         viewModelScope.launch(Dispatchers.IO) {
             conns.forEach { runCatching { it.send(msg) } }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // S3: audio alignment. Fingerprints arrive per take; the first device
+    // (lowest deviceId, deterministic) is the reference; every other angle
+    // is pre-aligned by session timestamps, then cross-correlated. The
+    // residual IS gate G2's number: it is how far the clock was from the
+    // truth the sound proves. < 33 ms = sub-frame.
+    // ------------------------------------------------------------------
+
+    private class Snippet(val startSessionNanos: Long, val pcm: ShortArray)
+
+    private val snippets = mutableMapOf<String, MutableMap<String, Snippet>>() // takeId -> deviceId -> snippet
+
+    private fun onSnippet(msg: Msg.AudioSnippet) {
+        val bytes = try {
+            Base64.decode(msg.pcmBase64, Base64.NO_WRAP)
+        } catch (_: Exception) {
+            return
+        }
+        val pcm = ShortArray(bytes.size / 2)
+        java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .asShortBuffer().get(pcm)
+        val perTake = synchronized(snippets) {
+            snippets.getOrPut(msg.takeId) { mutableMapOf() }.also {
+                it[msg.deviceId] = Snippet(msg.startSessionNanos, pcm)
+            }.toMap()
+        }
+        logLine("fingerprint from ${msg.deviceId} (${perTake.size} total)")
+        if (perTake.size >= 2) alignTake(msg.takeId, perTake)
+    }
+
+    private fun alignTake(takeId: String, perTake: Map<String, Snippet>) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val refId = perTake.keys.min()
+            val ref = perTake.getValue(refId)
+            _reports.value = _reports.value + (refId to TakeReport("ALIGNED", "reference angle"))
+            for ((devId, snip) in perTake) {
+                if (devId == refId) continue
+                // Trim both to a common session start so xcorr measures pure residual.
+                val commonStart = maxOf(ref.startSessionNanos, snip.startSessionNanos)
+                val rate = AudioExtract.TARGET_RATE
+                val refSkip = ((commonStart - ref.startSessionNanos) * rate / 1_000_000_000L).toInt()
+                val otherSkip = ((commonStart - snip.startSessionNanos) * rate / 1_000_000_000L).toInt()
+                if (refSkip >= ref.pcm.size || otherSkip >= snip.pcm.size) continue
+                val result = Xcorr.align(
+                    ref.pcm.copyOfRange(refSkip, ref.pcm.size),
+                    snip.pcm.copyOfRange(otherSkip, snip.pcm.size),
+                )
+                val residualMs = result.shiftMicros / 1000.0
+                val subFrame = kotlin.math.abs(residualMs) <= 33.0
+                val verdict = if (subFrame) "SUB-FRAME" else "OFF BY >1 FRAME"
+                _reports.value = _reports.value +
+                    (devId to TakeReport("ALIGNED", "residual %+.1f ms vs ref - %s (corr %.2f)".format(residualMs, verdict, result.peak)))
+                logLine("$takeId $devId: %+.1f ms, corr %.2f".format(residualMs, result.peak))
+            }
         }
     }
 
@@ -265,6 +326,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         writeSidecar(file, offset)
                         logLine("SAVED ${file.name}")
                         client.send(Msg.TakeStatus(deviceId, takeId ?: "?", "SAVED", file.name))
+                        sendAudioFingerprint(file, offset)
                     }
                 }
                 else -> Unit
@@ -272,6 +334,29 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (currentRecording == null) {
             client.send(Msg.TakeStatus(deviceId, takeId ?: "?", "ERROR", "startRecording returned null"))
+        }
+    }
+
+    /**
+     * S3: decode this take's first seconds of audio to a mono 16 kHz
+     * fingerprint and ship it to the controller for cross-correlation.
+     * ~380 KB over the LAN; the footage itself never leaves the device.
+     */
+    private fun sendAudioFingerprint(videoFile: File, offset: Long) {
+        val tid = takeId ?: return
+        val startSession = actualStartLocal + offset
+        viewModelScope.launch(Dispatchers.Default) {
+            val pcm = AudioExtract.extractMono16k(videoFile)
+            if (pcm == null || pcm.size < AudioExtract.TARGET_RATE) {
+                client.send(Msg.TakeStatus(deviceId, tid, "NO_AUDIO", "no usable audio track on ${Build.MODEL}"))
+                return@launch
+            }
+            val bytes = ByteArray(pcm.size * 2)
+            java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .asShortBuffer().put(pcm)
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            client.send(Msg.AudioSnippet(deviceId, tid, AudioExtract.TARGET_RATE, startSession, b64))
+            logLine("audio fingerprint sent (${pcm.size / AudioExtract.TARGET_RATE}s)")
         }
     }
 
