@@ -5,6 +5,18 @@ Turn 2–4 Android phones into a synced multicam rig that a tablet monitors, cut
 
 > "Final Cut" appears in some documents as the original research reference (Apple's Final Cut Camera + Final Cut Pro for iPad Live Multicam workflow). It is an Apple trademark and is **not** this product's name.
 
+## Try it (prebuilt APK)
+
+A ready-to-install debug build lives at [`apk/MultiCam-v0.1-sync.apk`](apk/MultiCam-v0.1-sync.apk) (updated per milestone).
+
+1. Download the APK to an Android phone/tablet (minSdk 33 / Android 13+).
+2. Open it; allow "install from this source" if prompted.
+3. Put every device on the **same Wi-Fi network**.
+4. On the tablet tap **CONTROLLER**; on each phone tap **CAMERA**.
+5. Cameras discover the controller and lock a shared clock (offset shown in µs). Press **ROLL ALL CAMERAS**, then **STOP** — each phone records locally and reports back.
+
+Verified on a Galaxy Tab S10 FE (controller) + 2× Galaxy S23 FE (cameras): shared-clock lock at **±2.7 ms**, synchronized trigger to the nanosecond. See [`docs/`](docs/) for the specs and [the commit log](../../commits/main) for the S1→S3 build history.
+
 ## Why this exists
 
 There is no pro-grade multicam editor on Android — LumaFusion withholds multicam as iOS-exclusive, DaVinci Resolve has no Android build, Premiere Rush is dead, CapCut is cloud-tethered. This project fills that vacancy: free capture + sync + cut, with a paid on-device AI layer (transcript-driven editing via whisper.cpp, auto-reframe, AI-assisted angle selection) that nothing reachable on an Android phone offers.
