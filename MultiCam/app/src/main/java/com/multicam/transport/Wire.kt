@@ -4,11 +4,13 @@ import org.json.JSONObject
 
 /**
  * The wire protocol, in full. Newline-delimited JSON over TCP for control;
- * fixed-layout binary over UDP for time sync (see TimeSync.kt — text is too
- * slow to stamp accurately there).
+ * fixed-layout binary over UDP for time sync (see TimeSync.kt).
  *
- * Deliberately tiny: every message type the tech spec's session state machine
- * needs for S1. ROLL/STOP arrive in S2 as scheduled-time commands.
+ * S2 adds the take lifecycle: ROLL carries a *future* start instant in
+ * session-clock nanos — every camera translates it to its local clock via its
+ * learned offset and fires at the same physical moment. STOP is immediate.
+ * TAKE_STATUS flows camera -> controller so the director sees every angle's
+ * actual behavior (how far from T it started, where the file landed).
  */
 const val SERVICE_TYPE = "_multicam._tcp."
 
@@ -19,11 +21,31 @@ sealed class Msg {
     /** controller -> camera, reply to Hello. Carries the UDP time-sync port. */
     data class Welcome(val sessionId: String, val timeSyncPort: Int) : Msg()
 
+    /** controller -> all cameras: start recording at this session-clock instant. */
+    data class Roll(val takeId: String, val startAtSessionNanos: Long) : Msg()
+
+    /** controller -> all cameras: stop the named take now. */
+    data class Stop(val takeId: String) : Msg()
+
+    /** camera -> controller: RECORDING / SAVED / ERROR + human-readable detail. */
+    data class TakeStatus(
+        val deviceId: String,
+        val takeId: String,
+        val state: String,
+        val detail: String,
+    ) : Msg()
+
     fun toJson(): String = when (this) {
         is Hello -> JSONObject().put("type", "HELLO")
             .put("deviceId", deviceId).put("name", name)
         is Welcome -> JSONObject().put("type", "WELCOME")
             .put("sessionId", sessionId).put("timeSyncPort", timeSyncPort)
+        is Roll -> JSONObject().put("type", "ROLL")
+            .put("takeId", takeId).put("startAtSessionNanos", startAtSessionNanos)
+        is Stop -> JSONObject().put("type", "STOP").put("takeId", takeId)
+        is TakeStatus -> JSONObject().put("type", "TAKE_STATUS")
+            .put("deviceId", deviceId).put("takeId", takeId)
+            .put("state", state).put("detail", detail)
     }.toString()
 
     companion object {
@@ -32,6 +54,12 @@ sealed class Msg {
             when (o.getString("type")) {
                 "HELLO" -> Hello(o.getString("deviceId"), o.getString("name"))
                 "WELCOME" -> Welcome(o.getString("sessionId"), o.getInt("timeSyncPort"))
+                "ROLL" -> Roll(o.getString("takeId"), o.getLong("startAtSessionNanos"))
+                "STOP" -> Stop(o.getString("takeId"))
+                "TAKE_STATUS" -> TakeStatus(
+                    o.getString("deviceId"), o.getString("takeId"),
+                    o.getString("state"), o.getString("detail"),
+                )
                 else -> null
             }
         } catch (_: Exception) {
