@@ -1,11 +1,14 @@
 package com.multicam
 
 import android.app.Application
+import android.content.ContentValues
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
 import android.content.Context
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.util.Base64
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
@@ -422,6 +425,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         logLine("SAVED ${file.name}")
                         client.send(Msg.TakeStatus(deviceId, takeId ?: "?", "SAVED", file.name))
                         sendAudioFingerprint(file, offset)
+                        copyToGallery(file)
                     }
                 }
                 else -> Unit
@@ -452,6 +456,36 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
             client.send(Msg.AudioSnippet(deviceId, tid, AudioExtract.TARGET_RATE, startSession, b64))
             logLine("audio fingerprint sent (${pcm.size / AudioExtract.TARGET_RATE}s)")
+        }
+    }
+
+    /**
+     * Copies the finished take into shared Movies/MultiCam/ so it shows in
+     * Gallery and My Files (Android hides Android/data/ from both). The
+     * app-private original stays: the sidecar and fingerprint refer to it.
+     * Same-named takes are not overwritten - MediaStore appends " (1)".
+     */
+    private fun copyToGallery(videoFile: File) {
+        val resolver = getApplication<Application>().contentResolver
+        viewModelScope.launch(Dispatchers.IO) {
+            var uri: Uri? = null
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, videoFile.name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/MultiCam")
+                    put(MediaStore.Video.Media.IS_PENDING, 1) // hidden from Gallery until fully written
+                }
+                val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                uri = resolver.insert(collection, values) ?: error("MediaStore insert returned null")
+                val out = resolver.openOutputStream(uri) ?: error("no output stream")
+                out.use { o -> videoFile.inputStream().use { it.copyTo(o) } }
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                logLine("copied to Gallery: Movies/MultiCam")
+            } catch (e: Exception) {
+                uri?.let { u -> runCatching { resolver.delete(u, null, null) } } // drop the half-written copy
+                logLine("Gallery copy failed: ${e.message}")
+            }
         }
     }
 
