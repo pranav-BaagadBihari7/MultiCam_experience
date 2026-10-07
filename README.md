@@ -7,13 +7,14 @@ Turn 2–4 Android phones into a synced multicam rig that a tablet monitors, cut
 
 ## Try it (prebuilt APK)
 
-A ready-to-install debug build lives at [`apk/MultiCam-v0.1-sync.apk`](apk/MultiCam-v0.1-sync.apk) (updated per milestone).
+A ready-to-install debug build lives at [`apk/MultiCam-v0.2-gallery.apk`](apk/MultiCam-v0.2-gallery.apk) (updated per milestone).
 
 1. Download the APK to an Android phone/tablet (minSdk 33 / Android 13+).
 2. Open it; allow "install from this source" if prompted.
 3. Put every device on the **same Wi-Fi network**.
 4. On the tablet tap **CONTROLLER**; on each phone tap **CAMERA**.
 5. Cameras discover the controller and lock a shared clock (offset shown in µs). Press **ROLL ALL CAMERAS**, then **STOP** — each phone records locally and reports back.
+6. Each camera's takes appear in **Gallery > Albums > MultiCam** (shared `Movies/MultiCam/` folder).
 
 Verified on a Galaxy Tab S10 FE (controller) + 2× Galaxy S23 FE (cameras): shared-clock lock at **±2.7 ms**, synchronized trigger to the nanosecond. See [`docs/`](docs/) for the specs and [the commit log](../../commits/main) for the S1→S3 build history.
 
